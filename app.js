@@ -30,18 +30,46 @@ renderer.setPixelRatio(RECORD ? 1 : Math.min(window.devicePixelRatio || 1, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.2;
+renderer.toneMappingExposure = 1.15;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x161614);
-scene.fog = new THREE.Fog(0x161614, 260, 520);
+scene.background = new THREE.Color(0x131311);
+scene.fog = new THREE.Fog(0x131311, 300, 620);
 
-const camera = new THREE.PerspectiveCamera(35, 2, 1, 2000);
-camera.position.set(108, 46, 158);
+// ---- procedural studio environment map (PMREM) ----
+// A tiny studio: warm softbox upper-left, cool strip right, rim strip behind,
+// faint accent strip low-front, dark floor below. No external HDR, no AI images.
+// This is what makes the PBR materials read as photographed, not rendered.
+function buildEnvironment() {
+  const env = new THREE.Scene();
+  const panel = (color, intensity, w, h, pos) => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(color).multiplyScalar(intensity), side: THREE.DoubleSide }));
+    m.position.set(pos[0], pos[1], pos[2]);
+    m.lookAt(0, 0, 0);
+    env.add(m);
+  };
+  panel(0xfff1dd, 22, 130, 95, [-85, 115, 65]);   // warm key softbox
+  panel(0xcfe0f2, 12, 75, 120, [115, 45, 45]);    // cool strip, right
+  panel(0xffffff, 9, 170, 45, [0, 35, -130]);     // rim strip, behind
+  panel(0xE4572E, 5, 45, 9, [0, -25, 95]);        // faint accent strip, low front
+  const fl = new THREE.Mesh(new THREE.PlaneGeometry(500, 500),
+    new THREE.MeshBasicMaterial({ color: 0x0a0a09 }));
+  fl.rotation.x = -Math.PI / 2; fl.position.y = -85; env.add(fl);
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  const rt = pmrem.fromScene(env, 0.04);
+  pmrem.dispose();
+  return rt.texture;
+}
+scene.environment = buildEnvironment();
+scene.environmentIntensity = 0.6;
+
+const camera = new THREE.PerspectiveCamera(30, 2, 1, 2000);
+camera.position.set(95, 55, 140);
 
 const controls = new OrbitControls(camera, canvas);
-controls.target.set(0, -22, 0);
+controls.target.set(0, -26, 0);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.enablePan = false;
@@ -52,9 +80,10 @@ controls.maxPolarAngle = 1.85;
 controls.autoRotate = !RECORD && !REDUCED;
 controls.autoRotateSpeed = 0.7;
 
-// ---- lights: soft key upper-left, cool fill right, stronger rim ----
-scene.add(new THREE.HemisphereLight(0xdfe6ea, 0x1a1a18, 0.85));
-const key = new THREE.DirectionalLight(0xfff2e2, 3.8);
+// ---- lights: warm studio key, cool fill, strong rim for separation ----
+// The env map carries the ambient; these lights shape the product.
+scene.add(new THREE.HemisphereLight(0xdfe6ea, 0x1a1a18, 0.35));
+const key = new THREE.DirectionalLight(0xffe9c9, 3.0);
 key.position.set(-90, 130, 80);
 key.castShadow = true;
 key.shadow.mapSize.set(2048, 2048);
@@ -62,12 +91,16 @@ key.shadow.camera.left = -120; key.shadow.camera.right = 120;
 key.shadow.camera.top = 120; key.shadow.camera.bottom = -120;
 key.shadow.camera.far = 500; key.shadow.bias = -0.0004;
 scene.add(key);
-const fill = new THREE.DirectionalLight(0xbfd0e0, 1.6); // cool fill, right
+const fill = new THREE.DirectionalLight(0xbfd0e0, 1.2); // cool fill, right
 fill.position.set(110, 30, 60);
 scene.add(fill);
-const rim = new THREE.DirectionalLight(0xffffff, 1.5);
+const rim = new THREE.DirectionalLight(0xffffff, 2.2); // strong rim, back
 rim.position.set(20, 60, -130);
 scene.add(rim);
+// warm pool light low-front, lifts the sensor ring side
+const poolLight = new THREE.PointLight(0xffd9b0, 0.5, 320, 1.6);
+poolLight.position.set(-20, -30, 110);
+scene.add(poolLight);
 
 // ---- procedural canvas textures (no AI images, no external assets) ----
 function noiseTexture(size = 128, lo = 118, hi = 168) {
@@ -86,20 +119,24 @@ function noiseTexture(size = 128, lo = 118, hi = 168) {
   t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(3, 3);
   return t;
 }
-function screenTexture() {
-  const c = document.createElement('canvas'); c.width = 512; c.height = 340;
-  const g = c.getContext('2d');
+// Live sensor waveform — redrawn per frame in the loop so it scrolls.
+// phase 0..1 shifts every sine by a whole number of periods, so phase 1 == phase 0.
+const screenCanvas = document.createElement('canvas');
+screenCanvas.width = 512; screenCanvas.height = 340;
+const screenCtx = screenCanvas.getContext('2d');
+function drawScreen(phase = 0) {
+  const g = screenCtx;
   g.fillStyle = '#0A100D'; g.fillRect(0, 0, 512, 340);
   g.strokeStyle = 'rgba(255,255,255,0.07)'; g.lineWidth = 1;
   for (let x = 0; x <= 512; x += 32) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, 340); g.stroke(); }
   for (let y = 0; y <= 340; y += 34) { g.beginPath(); g.moveTo(0, y); g.lineTo(512, y); g.stroke(); }
-  // live sensor waveform — deterministic sum of sines
   g.strokeStyle = '#E4572E'; g.lineWidth = 3; g.lineJoin = 'round';
   g.beginPath();
   for (let x = 0; x <= 512; x += 2) {
     const t = x / 512;
-    const y = 190 - 62 * Math.sin(t * Math.PI * 6) * Math.exp(-Math.pow((t % 0.33) * 3 - 1, 2) * 0)
-      - 34 * Math.sin(t * Math.PI * 13 + 1.3) - 12 * Math.sin(t * Math.PI * 29);
+    const y = 190 - 62 * Math.sin((t + phase) * Math.PI * 6)
+      - 34 * Math.sin((t + phase) * Math.PI * 13 + 1.3)
+      - 12 * Math.sin((t + phase) * Math.PI * 29);
     x === 0 ? g.moveTo(x, y) : g.lineTo(x, y);
   }
   g.stroke();
@@ -110,7 +147,10 @@ function screenTexture() {
   g.fillStyle = '#9A978C'; g.font = '20px ui-monospace, Menlo, monospace';
   g.fillText('<50 ms', 150, 306);
   g.fillText('BLE ●', 420, 306);
-  const t = new THREE.CanvasTexture(c);
+}
+function screenTexture() {
+  drawScreen(0);
+  const t = new THREE.CanvasTexture(screenCanvas);
   t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
   return t;
 }
@@ -135,18 +175,20 @@ function strapTexture() {
 }
 
 const roughNoise = noiseTexture();
-const shellMat = new THREE.MeshStandardMaterial({ color: 0x2B2B28, roughness: 0.55, metalness: 0.18, roughnessMap: roughNoise, bumpMap: roughNoise, bumpScale: 0.15 });
-const darkMat = new THREE.MeshStandardMaterial({ color: 0x171715, roughness: 0.6, metalness: 0.2, roughnessMap: roughNoise });
+// Product-film materials: clearcoat shell, true metal hardware, matte strap.
+// The env map does the work — clearcoat + metal read the studio panels.
+const shellMat = new THREE.MeshPhysicalMaterial({ color: 0x35342F, roughness: 0.38, metalness: 0.22, clearcoat: 0.6, clearcoatRoughness: 0.28, roughnessMap: roughNoise, bumpMap: roughNoise, bumpScale: 0.15, envMapIntensity: 0.9 });
+const darkMat = new THREE.MeshPhysicalMaterial({ color: 0x171715, roughness: 0.5, metalness: 0.3, clearcoat: 0.3, clearcoatRoughness: 0.4, roughnessMap: roughNoise, envMapIntensity: 0.8 });
 const seamMat = new THREE.MeshStandardMaterial({ color: 0x080807, roughness: 0.8, metalness: 0.05 });
-const bezelMat = new THREE.MeshStandardMaterial({ color: 0x101010, roughness: 0.35, metalness: 0.35 });
-const glassMat = new THREE.MeshStandardMaterial({ color: 0x0B0F0E, roughness: 0.12, metalness: 0.25 });
-const accentMat = new THREE.MeshStandardMaterial({ color: 0xE4572E, roughness: 0.4, metalness: 0.1, emissive: ACCENT, emissiveIntensity: 0.55 });
-const ledMat = new THREE.MeshStandardMaterial({ color: 0xE4572E, roughness: 0.3, metalness: 0.1, emissive: ACCENT, emissiveIntensity: 1.6 });
-const metalMat = new THREE.MeshStandardMaterial({ color: 0x8A8A84, roughness: 0.35, metalness: 0.9 });
-const buckleMat = new THREE.MeshStandardMaterial({ color: 0x3C3C38, roughness: 0.42, metalness: 0.75 });
+const bezelMat = new THREE.MeshPhysicalMaterial({ color: 0x0E0E0E, roughness: 0.28, metalness: 0.5, clearcoat: 0.8, clearcoatRoughness: 0.2, envMapIntensity: 1.0 });
+const glassMat = new THREE.MeshPhysicalMaterial({ color: 0x0B0F0E, roughness: 0.08, metalness: 0.1, clearcoat: 1.0, clearcoatRoughness: 0.08, envMapIntensity: 1.1 });
+const accentMat = new THREE.MeshStandardMaterial({ color: 0xE4572E, roughness: 0.4, metalness: 0.1, emissive: ACCENT, emissiveIntensity: 0.55, envMapIntensity: 0.6 });
+const ledMat = new THREE.MeshStandardMaterial({ color: 0xE4572E, roughness: 0.3, metalness: 0.1, emissive: ACCENT, emissiveIntensity: 1.6, envMapIntensity: 0.6 });
+const metalMat = new THREE.MeshPhysicalMaterial({ color: 0x9A9A94, roughness: 0.26, metalness: 1.0, clearcoat: 0.25, clearcoatRoughness: 0.3, envMapIntensity: 1.25 });
+const buckleMat = new THREE.MeshPhysicalMaterial({ color: 0x3C3C38, roughness: 0.34, metalness: 0.85, clearcoat: 0.4, clearcoatRoughness: 0.3, envMapIntensity: 1.0 });
 const screenMat = new THREE.MeshBasicMaterial({ map: screenTexture() });
 const strapTex = strapTexture();
-const strapMat = new THREE.MeshStandardMaterial({ map: strapTex, color: 0xffffff, roughness: 0.88, metalness: 0.0, side: THREE.DoubleSide });
+const strapMat = new THREE.MeshStandardMaterial({ map: strapTex, color: 0xffffff, roughness: 0.88, metalness: 0.0, side: THREE.DoubleSide, envMapIntensity: 0.4 });
 
 function shadowed(m) { m.castShadow = true; m.receiveShadow = true; return m; }
 
@@ -156,13 +198,32 @@ const model = new THREE.Group();           // the device, exported as-is
 turntable.add(model);
 scene.add(turntable);
 
-// ground shadow catcher
-const ground = new THREE.Mesh(
-  new THREE.PlaneGeometry(600, 600),
-  new THREE.ShadowMaterial({ opacity: 0.32 })
+// glossy studio floor: catches a faint reflection of the env panels and a warm
+// pool of light under the device (Apple-style product-film floor)
+function poolTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 512;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(256, 256, 10, 256, 256, 250);
+  grad.addColorStop(0, 'rgba(255,225,190,0.55)');
+  grad.addColorStop(0.35, 'rgba(255,210,170,0.18)');
+  grad.addColorStop(1, 'rgba(255,210,170,0)');
+  g.fillStyle = grad; g.fillRect(0, 0, 512, 512);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+const floor = new THREE.Mesh(
+  new THREE.CircleGeometry(320, 64),
+  new THREE.MeshStandardMaterial({ color: 0x111110, roughness: 0.32, metalness: 0.6, envMapIntensity: 0.7 })
 );
-ground.rotation.x = -Math.PI / 2; ground.position.y = -70; ground.receiveShadow = true;
-scene.add(ground);
+floor.rotation.x = -Math.PI / 2; floor.position.y = -70; floor.receiveShadow = true;
+scene.add(floor);
+const pool = new THREE.Mesh(
+  new THREE.PlaneGeometry(300, 300),
+  new THREE.MeshBasicMaterial({ map: poolTexture(), transparent: true, opacity: 0.55, depthWrite: false })
+);
+pool.rotation.x = -Math.PI / 2; pool.position.y = -69.8;
+scene.add(pool);
 
 const parts = []; // {group, dir, dist, anchor, label, sub, meshes[]}
 function registerPart(group, dir, dist, anchor, label, sub) {
@@ -350,7 +411,31 @@ let buckleGroup;
 registerPart(strapBottom, new THREE.Vector3(0, 0, -1), 26, new THREE.Vector3(0, -52, -52), 'Buckle', 'strap buckle · pin');
 // buckle is part of the strap group visually; keep its own label anchor via the same part.
 
-// ---- labels ----
+// ---- cinematic loop motion ----
+// Every motion is a smooth function of loop phase t in [0,1), so t=1 == t=0
+// and the loop wraps invisibly: full orbit, gentle dolly, slight rise,
+// scrolling waveform, LED pulse. (Apple-style product film, not a flat spin.)
+let loopPhase = 0;
+// Phase-0 turntable offset: the loop opens on a diagonal 3/4 view — screen
+// text still readable, straps falling to the sides, not straight at the camera.
+const PHASE0 = 1.35;
+const CAM_BASE = { x: 95, y: 55, z: 140, r: Math.hypot(95, 140) };
+function setPhase(t, angleOverride = null) {
+  loopPhase = t;
+  const w = Math.PI * 2;
+  turntable.rotation.y = angleOverride !== null ? angleOverride : PHASE0 + w * t;
+  const r = CAM_BASE.r + 10 * Math.sin(w * t);
+  const s = r / CAM_BASE.r;
+  camera.position.set(
+    CAM_BASE.x * s,
+    CAM_BASE.y + 6 * Math.sin(w * t + 1.2),
+    CAM_BASE.z * s
+  );
+  camera.lookAt(controls.target);
+  drawScreen(t);
+  screenMat.map.needsUpdate = true;
+  model.updateMatrixWorld(true);
+}
 const labelDivs = parts.map(p => {
   const d = document.createElement('div');
   d.className = 'label';
@@ -428,7 +513,7 @@ spinBtn.addEventListener('click', () => {
 if (REDUCED) { controls.autoRotate = false; }
 syncSpinBtn();
 document.getElementById('resetBtn').addEventListener('click', () => {
-  camera.position.set(108, 46, 158); controls.target.set(0, -22, 0);
+  camera.position.set(95, 55, 140); controls.target.set(0, -26, 0);
   applyExplode(0); controls.update();
 });
 
@@ -471,6 +556,7 @@ const clock = new THREE.Clock();
 const labelV = new THREE.Vector3();
 function projectLabels() {
   const w = stage.clientWidth, h = stage.clientHeight;
+  const placed = []; // anchor points already used, for de-collision
   parts.forEach((p, i) => {
     const d = labelDivs[i];
     const show = explodeT > 0.12 || hovered === p;
@@ -478,8 +564,15 @@ function projectLabels() {
     labelV.copy(p.anchor).applyMatrix4(p.group.matrixWorld);
     labelV.project(camera);
     if (labelV.z > 1) { d.classList.remove('on'); return; }
-    d.style.left = `${(labelV.x * 0.5 + 0.5) * w}px`;
-    d.style.top = `${(-labelV.y * 0.5 + 0.5) * h}px`;
+    let x = (labelV.x * 0.5 + 0.5) * w;
+    let y = (-labelV.y * 0.5 + 0.5) * h;
+    // de-collide: nudge a label down while it would overlap one already placed
+    for (const q of placed) {
+      if (Math.abs(x - q.x) < 150 && Math.abs(y - q.y) < 42) y = q.y + 46;
+    }
+    placed.push({ x, y });
+    d.style.left = `${x}px`;
+    d.style.top = `${y}px`;
     d.classList.add('on');
   });
 }
@@ -491,7 +584,9 @@ function renderFrame(timeSec) {
     setHover(hit ? hit.object.userData.part || null : null);
   }
   // LED pulse (frozen in record mode for determinism)
-  ledPulse.emissiveIntensity = RECORD ? 1.6 : 1.3 + 0.7 * Math.sin(timeSec * 2.2);
+  ledPulse.emissiveIntensity = RECORD
+    ? 1.3 + 0.7 * Math.sin(loopPhase * Math.PI * 2)
+    : 1.3 + 0.7 * Math.sin(timeSec * 2.2);
   controls.update();
   renderer.render(scene, camera);
   projectLabels();
@@ -503,20 +598,20 @@ if (RECORD) {
     const el = document.querySelector(sel); if (el) el.style.display = 'none';
   }
   stage.style.minHeight = '720px'; stage.style.height = '720px';
-  // deterministic turntable: rotation = 2π·K/N, camera fixed, no idle motion
-  turntable.rotation.y = (Math.PI * 2 * FRAME) / FRAMES;
-  if (params.get('angle') !== null) turntable.rotation.y = +params.get('angle');
-  model.updateMatrixWorld(true);
+  // deterministic cinematic loop: phase = K/N drives orbit, dolly, waveform, LED
+  if (params.get('angle') !== null) setPhase(0, +params.get('angle'));
+  else setPhase(FRAME / FRAMES);
   renderFrame(0);
   window.__ready = true;
 } else {
-  if (REDUCED) turntable.rotation.y = -0.6;
+  turntable.rotation.y = PHASE0;
   renderer.setAnimationLoop(() => renderFrame(clock.getElapsedTime()));
   window.__ready = true;
 }
 // deterministic hooks used by headless frame capture (same code path as record mode)
 window.__rw = {
   setAngle: a => { turntable.rotation.y = a; model.updateMatrixWorld(true); },
+  setPhase: t => { setPhase(t); },
   setExplode: v => applyExplode(Math.max(0, Math.min(1, v))),
   render: () => renderFrame(0),
   ready: () => !!window.__ready,
